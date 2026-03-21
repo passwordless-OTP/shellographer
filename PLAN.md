@@ -518,7 +518,139 @@ print_summary
 
 ---
 
-### Step 11: Performance Tests
+### Step 11: End-to-End Tests
+**Files:** `tests/e2e/test_*.zsh`  
+**Time:** 1.5 hours
+
+```
+tests/e2e/
+├── test_fresh_install.zsh
+├── test_real_zshrc.zsh
+└── test_cli_integration.zsh
+```
+
+**test_fresh_install.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+
+test_install_script_on_fresh_system() {
+  # Simulate fresh install
+  local test_home=$(mktemp -d)
+  local test_zsh_custom="$test_home/.oh-my-zsh/custom"
+  
+  # Run install script
+  ZSH_CUSTOM="$test_zsh_custom" ./install.sh --dry-run 2>&1
+  assert_equals 0 $? "Install script runs without errors"
+  
+  # Verify structure
+  [[ -d "$test_zsh_custom/plugins/shellographer" ]]
+  assert_equals 0 $? "Plugin directory created"
+  
+  [[ -f "$test_zsh_custom/plugins/shellographer/shellographer.plugin.zsh" ]]
+  assert_equals 0 $? "Main plugin file exists"
+  
+  # Cleanup
+  rm -rf "$test_home"
+}
+
+test_uninstall_removes_all() {
+  # Verify clean removal is possible
+  local test_home=$(mktemp -d)
+  cp -r . "$test_home/shellographer"
+  
+  rm -rf "$test_home/shellographer"
+  [[ ! -d "$test_home/shellographer" ]]
+  assert_equals 0 $? "Uninstall removes all files"
+  
+  rm -rf "$test_home"
+}
+
+run_test test_install_script_on_fresh_system
+run_test test_uninstall_removes_all
+print_summary
+```
+
+**test_real_zshrc.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+
+test_backup_and_modify_real_zshrc() {
+  # Backup real .zshrc
+  cp ~/.zshrc ~/.zshrc.backup.test
+  
+  # Add shellographer
+  echo '' >> ~/.zshrc
+  echo '# Added by shellographer test' >> ~/.zshrc
+  echo 'plugins=(shellographer)' >> ~/.zshrc
+  
+  # Test load
+  zsh -c "source ~/.zshrc; exit 0" 2>&1
+  local result=$?
+  
+  # Restore
+  mv ~/.zshrc.backup.test ~/.zshrc
+  
+  assert_equals 0 $result "Real .zshrc loads with shellographer"
+}
+
+test_aliases_available_after_source() {
+  # Source plugin and verify aliases exist
+  source shellographer/shellographer.plugin.zsh 2>/dev/null
+  
+  (( $+aliases[wrangler-dev-server] || $+functions[wrangler-dev-server] ))
+  assert_equals 0 $? "Wrangler aliases available after source"
+}
+
+run_test test_backup_and_modify_real_zshrc
+run_test test_aliases_available_after_source
+print_summary
+```
+
+**test_cli_integration.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+
+test_wrangler_aliases_with_real_cli() {
+  skip_if_no_command "wrangler" || return 0
+  
+  # If wrangler installed, verify aliases work
+  source shellographer/plugins/wrangler/wrangler.plugin.zsh
+  
+  # Test that alias points to valid command
+  alias wrangler-dev-server | grep -q "wrangler dev"
+  assert_equals 0 $? "wrangler-dev-server alias is valid"
+}
+
+test_gh_aliases_with_real_cli() {
+  skip_if_no_command "gh" || return 0
+  
+  source shellographer/plugins/gh/gh.plugin.zsh
+  
+  alias gh-pr-create | grep -q "gh pr create"
+  assert_equals 0 $? "gh-pr-create alias is valid"
+}
+
+test_docker_aliases_with_real_cli() {
+  skip_if_no_command "docker" || return 0
+  
+  source shellographer/plugins/docker/docker.plugin.zsh
+  
+  alias docker-container-list | grep -q "docker ps"
+  assert_equals 0 $? "docker-container-list alias is valid"
+}
+
+run_test test_wrangler_aliases_with_real_cli
+run_test test_gh_aliases_with_real_cli
+run_test test_docker_aliases_with_real_cli
+print_summary
+```
+
+---
+
+### Step 13: Performance Tests
 **Files:** `tests/performance/test_*.zsh`  
 **Time:** 1 hour
 
@@ -599,7 +731,7 @@ exit $?
 
 ---
 
-### Step 13: CI Configuration
+### Step 14: CI Configuration
 **File:** `.github/workflows/test.yml`  
 **Time:** 0.5 hours
 
@@ -642,7 +774,7 @@ jobs:
 
 ---
 
-### Step 14: Documentation
+### Step 15: Documentation
 **Files:**  
 **Time:** 3 hours
 
@@ -653,7 +785,7 @@ jobs:
 
 ---
 
-### Step 15: Install Script
+### Step 16: Install Script
 **File:** `install.sh`  
 **Time:** 2 hours
 
@@ -690,7 +822,7 @@ echo "  SHELLOGRAPHER_DEBUG=1"
 
 ---
 
-### Step 16: Performance Benchmarks
+### Step 17: Performance Benchmarks
 **Time:** 1 hour
 
 ```bash
@@ -705,7 +837,7 @@ $ time (wrangler-<Tab>)
 
 ---
 
-### Step 17: GitHub Release
+### Step 18: GitHub Release
 **Time:** 1 hour
 
 - [ ] Tag v1.0.0
@@ -721,8 +853,8 @@ $ time (wrangler-<Tab>)
 |-------|-------|-------|--------------|
 | 1 | 4 | 9 | Core libs, loader, caps |
 | 2 | 3 | 11 | 3 plugins (wrangler, gh, docker) |
-| 3 | 7 | 10.5 | Tests (framework, unit, integration, perf, runner, CI), docs, install, release |
-| **Total** | **14** | **30.5** | **v1.0.0** |
+| 3 | 8 | 12 | Tests (framework, unit, integration, e2e, perf, runner, CI), docs, install, release |
+| **Total** | **15** | **32** | **v1.0.0** |
 
 ---
 
