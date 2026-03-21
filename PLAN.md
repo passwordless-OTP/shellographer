@@ -1,583 +1,384 @@
-# Shellographer Build Plan (Expanded)
+# Shellographer Build Plan (Production Ready)
 
-## Overview
-4 phases, 16 steps, ~40 hours over 4 weeks.
+## Revised Scope
 
-## Project Structure
+Based on senior developer review:
+- **Reduced scope:** 3 plugins (wrangler, gh, docker) for MVP
+- **Simplified:** Explicit plugin loading, no auto-discovery
+- **Performance:** No file I/O during startup
+- **Quality:** Debug mode, proper error handling, tests
 
-All files in `shellographer/` directory for single-directory install:
-
-```
-~/.oh-my-zsh/custom/plugins/shellographer/
-├── shellographer.plugin.zsh      # Main loader
-├── README.md
-├── lib/                          # Shared utilities
-│   ├── alias-helper.zsh
-│   ├── cache-helper.zsh
-│   └── caps.zsh
-└── plugins/                      # Individual tool plugins
-    ├── wrangler/
-    │   └── wrangler.plugin.zsh
-    ├── gh/
-    │   └── gh.plugin.zsh
-    ├── docker/
-    │   └── docker.plugin.zsh
-    ├── doctl/
-    ├── aws/
-    └── firebase/
-```
-
-**Install:**
-```bash
-git clone https://github.com/passwordless-OTP/shellographer.git \
-  ~/.oh-my-zsh/custom/plugins/shellographer
-```
-
-**Configure:**
-```zsh
-# ~/.zshrc
-plugins=(shellographer)
-```
+**Total:** ~25 hours over 3 weeks
 
 ---
 
 ## Phase 1: Core Infrastructure (Week 1)
 
-### Step 1: Create Shared Library
-**File:** `shellographer/lib/alias-helper.zsh`
-**Time:** 2 hours
-**Dependencies:** None
+### Step 1: Alias Helper
+**File:** `shellographer/lib/alias-helper.zsh`  
+**Time:** 3 hours
 
-**Implementation:**
 ```zsh
-# shellographer/lib/alias-helper.zsh
-# Shared utilities for safe alias creation
+# Requirements:
+# - No file I/O during init
+# - Debug mode (SHELLOGRAPHER_DEBUG=1)
+# - Memory-only registry
+# - Clear return codes (0=created, 1=skipped, 2=error)
 
-# _shellographer_alias <name> <command> [description]
-# Returns 0 if alias created, 1 if skipped (conflict)
+_typeset -gA _SHELLOGRAPHER_REGISTRY
+
+typeset -g SHELLOGRAPHER_DEBUG=${SHELLOGRAPHER_DEBUG:-0}
+
 _shellographer_alias() {
   local name=$1 cmd=$2 desc=${3:-}
   
-  # Check if function exists
-  (( $+functions[$name] )) && return 1
+  # Validation
+  [[ -z "$name" ]] && { 
+    (( SHELLOGRAPHER_DEBUG )) && print "[shellographer] Error: empty alias name" >&2
+    return 2
+  }
   
-  # Check if alias exists
-  (( $+aliases[$name] )) && return 1
+  # Conflict detection with feedback
+  if (( $+functions[$name] )); then
+    (( SHELLOGRAPHER_DEBUG )) && print "[shellographer] Skip: $name (function exists)" >&2
+    return 1
+  fi
   
-  # Check if command exists
-  (( $+commands[$name] )) && return 1
+  if (( $+aliases[$name] )); then
+    (( SHELLOGRAPHER_DEBUG )) && print "[shellographer] Skip: $name (alias exists)" >&2
+    return 1
+  fi
   
-  # Create alias
   alias "$name"="$cmd"
-  
-  # Register for caps if description provided
-  [[ -n $desc ]] && _shellographer_register "$name" "$desc"
+  [[ -n $desc ]] && _SHELLOGRAPHER_REGISTRY[$name]=$desc
   
   return 0
 }
-
-# _shellographer_register <alias> <description>
-# Registers alias for caps discovery
-_shellographer_register() {
-  local alias=$1 desc=$2
-  local registry="${ZSH_CACHE_DIR:-$HOME/.cache/oh-my-zsh}/shellographer/registry"
-  mkdir -p "${registry%/*}"
-  echo "$alias:$desc" >> "$registry"
-}
 ```
 
-**Testing:**
-```zsh
-# Test 1: Create alias
-source shellographer/lib/alias-helper.zsh
-_shellographer_alias "test-alias" "echo hello"
-alias test-alias  # Should show: test-alias='echo hello'
-
-# Test 2: Conflict with function
-test-alias() { echo "function"; }
-_shellographer_alias "test-alias" "echo hello"  # Should return 1
-unfunction test-alias
-
-# Test 3: Conflict with existing alias
-alias test-alias="echo existing"
-_shellographer_alias "test-alias" "echo hello"  # Should return 1
-unalias test-alias
-```
-
-**Acceptance Criteria:**
-- [ ] Sources without errors
-- [ ] Creates alias when no conflict
-- [ ] Returns 1 (skip) when function exists
-- [ ] Returns 1 (skip) when alias exists
-- [ ] Returns 1 (skip) when command exists
+**Tests:**
+- Create alias when no conflict
+- Skip when function exists
+- Skip when alias exists
+- Debug mode prints messages
 
 ---
 
-### Step 2: Create Cache Helper
-**File:** `shellographer/lib/cache-helper.zsh`
-**Time:** 1.5 hours
-**Dependencies:** Step 1
+### Step 2: Cache Helper
+**File:** `shellographer/lib/cache-helper.zsh`  
+**Time:** 2 hours
 
-**Implementation:**
 ```zsh
-# shellographer/lib/cache-helper.zsh
-# Async caching for completions
+# Requirements:
+# - Lock files prevent races
+# - Stale-while-revalidate
+# - Async refresh
 
-# _shellographer_cache <name> <ttl_seconds> <command>
-# Returns cached output or runs command async
+typeset -gA _SHELLOGRAPHER_CACHE_PID
+
 _shellographer_cache() {
   local name=$1 ttl=$2 cmd=$3
-  local cache_dir="${ZSH_CACHE_DIR:-$HOME/.cache/oh-my-zsh}/shellographer"
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/shellographer"
   local cache_file="$cache_dir/$name"
+  local lock_file="$cache_dir/$name.lock"
   
   mkdir -p "$cache_dir"
   
-  # Check if cache exists and is fresh
-  if [[ -f "$cache_file" ]]; then
-    local mod_time
-    if [[ "$OSTYPE" == darwin* ]]; then
-      mod_time=$(stat -f%m "$cache_file" 2>/dev/null)
-    else
-      mod_time=$(stat -c%Y "$cache_file" 2>/dev/null)
-    fi
-    local age=$(( $(date +%s) - ${mod_time:-0} ))
+  # Check freshness
+  if [[ -f "$cache_file" && ! -f "$lock_file" ]]; then
+    local mod_time=$(stat -f%m "$cache_file" 2>/dev/null || stat -c%Y "$cache_file" 2>/dev/null || echo 0)
+    local age=$(( $(date +%s) - mod_time ))
     
     if (( age < ttl )); then
       cat "$cache_file" 2>/dev/null
       return 0
     fi
+    
+    # Trigger async refresh with lock
+    if [[ ! -f "$lock_file" ]]; then
+      touch "$lock_file"
+      (eval "$cmd" >| "$cache_file" 2>/dev/null; rm -f "$lock_file") &!
+      _SHELLOGRAPHER_CACHE_PID[$name]=$!
+    fi
   fi
   
-  # Cache miss - refresh in background
-  (eval "$cmd" >| "$cache_file" 2>/dev/null) &
-  
-  # Return stale data if available, empty otherwise
+  # Return stale data
   cat "$cache_file" 2>/dev/null
-  return 0
-}
-
-# _shellographer_cache_invalidate <name>
-_shellographer_cache_invalidate() {
-  local cache_file="${ZSH_CACHE_DIR:-$HOME/.cache/oh-my-zsh}/shellographer/$1"
-  rm -f "$cache_file"
 }
 ```
 
-**Testing:**
-```zsh
-source shellographer/lib/cache-helper.zsh
-
-# Test 1: Cache miss
-_shellographer_cache "test" 60 "echo fresh"
-# Should run command, cache output
-
-# Test 2: Cache hit (within TTL)
-sleep 1
-_shellographer_cache "test" 60 "echo stale"
-# Should return "fresh" (cached)
-
-# Test 3: Cache expired
-sleep 2
-_shellographer_cache "test" 1 "echo expired"
-# Should trigger refresh in background
-```
+**Tests:**
+- Cache hit returns immediately
+- Cache miss triggers background job
+- Lock file prevents duplicate jobs
 
 ---
 
-### Step 3: Create Meta-Plugin Loader
-**File:** `shellographer/shellographer.plugin.zsh`
-**Time:** 1 hour
-**Dependencies:** Steps 1-2
-
-**Implementation:**
-```zsh
-# shellographer/shellographer.plugin.zsh
-# Core plugin - provides shared utilities
-
-# Guard: Skip if already loaded
-(( $+functions[_shellographer_alias] )) && return 0
-
-# Get plugin directory
-0=${(%):-%N}
-SHELLOGRAPHER_DIR="${0:A:h}"
-
-# Load shared libraries
-source "${SHELLOGRAPHER_DIR}/lib/alias-helper.zsh" 2>/dev/null || true
-source "${SHELLOGRAPHER_DIR}/lib/cache-helper.zsh" 2>/dev/null || true
-
-# Optional: Auto-load configured tools
-if [[ -n "$SHELLOGRAPHER_TOOLS" ]]; then
-  for tool in ${(s:,:)SHELLOGRAPHER_TOOLS}; do
-    local tool_file="${SHELLOGRAPHER_DIR}/../${tool}/${tool}.plugin.zsh"
-    [[ -f "$tool_file" ]] && source "$tool_file"
-  done
-fi
-```
-
-**Usage:**
-```zsh
-# ~/.zshrc
-plugins=(shellographer wrangler gh docker)
-# OR
-SHELLOGRAPHER_TOOLS="wrangler,gh,docker"
-plugins=(shellographer)
-```
-
----
-
-### Step 4: Create Wrangler Plugin (PoC)
-**File:** `wrangler/wrangler.plugin.zsh`
-**Time:** 4 hours
-**Dependencies:** Step 1
-
-**Aliases to Create:**
-| Alias | Command | Description |
-|-------|---------|-------------|
-| `wrangler-dev-server` | `wrangler dev` | Start local dev server |
-| `wrangler-deploy-worker` | `wrangler deploy` | Deploy worker |
-| `wrangler-kv-list` | `wrangler kv:list` | List KV namespaces |
-| `wrangler-kv-get` | `wrangler kv:key get` | Get KV value |
-| `wrangler-kv-put` | `wrangler kv:key put` | Put KV value |
-| `wrangler-r2-list` | `wrangler r2:buckets list` | List R2 buckets |
-| `wrangler-tail` | `wrangler tail` | Stream logs |
-| `wrangler-secrets-list` | `wrangler secret list` | List secrets |
-
-**Implementation:**
-```zsh
-# wrangler.plugin.zsh
-# PoC plugin with conflict detection
-
-# Guard: Skip if wrangler not installed
-(( $+commands[wrangler] )) || return 0
-
-# Load shellographer lib if available
-local lib="${ZSH_CUSTOM:-$ZSH/custom}/plugins/shellographer/lib/alias-helper.zsh"
-[[ -f "$lib" ]] && source "$lib"
-
-# Define aliases (with or without helper)
-if (( $+functions[_shellographer_alias] )); then
-  _shellographer_alias "wrangler-dev-server" "wrangler dev" "Start local dev server"
-  _shellographer_alias "wrangler-deploy-worker" "wrangler deploy" "Deploy to Cloudflare"
-  _shellographer_alias "wrangler-kv-list" "wrangler kv:list" "List KV namespaces"
-  _shellographer_alias "wrangler-kv-get" "wrangler kv:key get" "Get KV value"
-  _shellographer_alias "wrangler-kv-put" "wrangler kv:key put" "Put KV value"
-  _shellographer_alias "wrangler-r2-list" "wrangler r2:buckets list" "List R2 buckets"
-  _shellographer_alias "wrangler-tail" "wrangler tail" "Stream logs"
-  _shellographer_alias "wrangler-secrets-list" "wrangler secret list" "List secrets"
-else
-  # Fallback: manual conflict detection
-  (( $+functions[wrangler-dev-server] || $+aliases[wrangler-dev-server] )) || 
-    alias wrangler-dev-server="wrangler dev"
-  # ... etc for all 8
-fi
-
-# Basic completions ( Phase 1 - minimal)
-compdef '_path_files -/' wrangler-dev-server 2>/dev/null || true
-```
-
-**Testing:**
-```zsh
-# Test 1: Load without errors
-source wrangler/wrangler.plugin.zsh
-
-# Test 2: Aliases exist
-alias | grep wrangler-
-
-# Test 3: Tab completion
-wrangler-<Tab>  # Should show 8 options
-
-# Test 4: No conflict with user's function
-type wrangler-kv-get  # Should show alias
-```
-
----
-
-### Step 5: Integration Test with User's .zshrc
+### Step 3: Main Loader
+**File:** `shellographer/shellographer.plugin.zsh`  
 **Time:** 2 hours
-**Dependencies:** Steps 1-4
 
-**Test Scenarios:**
+```zsh
+# Requirements:
+# - Guard against double-loading
+# - Explicit plugin list (no auto-discovery)
+# - Graceful fallback if lib missing
+# - Clean up temp variables
 
-1. **Clean install**
-   ```zsh
-   cp -r shellographer wrangler ~/.oh-my-zsh/custom/plugins/
-   # Add to ~/.zshrc: plugins=(shellographer wrangler)
-   source ~/.zshrc
-   echo $?  # Must be 0
-   ```
+(( $+_SHELLOGRAPHER_LOADED )) && return 0
+typeset -gr _SHELLOGRAPHER_LOADED=1
 
-2. **With user's existing functions**
-   ```zsh
-   # User has in .zshrc:
-   wrangler-kv-get() { wrangler kv:key get "$@"; }
-   
-   source ~/.zshrc
-   # Should not error
-   # Should preserve user's function
-   type wrangler-kv-get  # Shows function, not alias
-   ```
+0=${(%):-%N}
+local _sdir=${0:A:h}
 
-3. **Tab discovery**
-   ```zsh
-   wrangler-<Tab>
-   # Shows:
-   # wrangler-deploy-worker  wrangler-kv-list
-   # wrangler-dev-server     wrangler-r2-list
-   # ...
-   ```
+# Load libs
+[[ -f "$_sdir/lib/alias-helper.zsh" ]] && source "$_sdir/lib/alias-helper.zsh"
+[[ -f "$_sdir/lib/cache-helper.zsh" ]] && source "$_sdir/lib/cache-helper.zsh"
 
-**Acceptance Criteria:**
-- [ ] `source ~/.zshrc` exits 0
-- [ ] No parse errors
-- [ ] 8 wrangler aliases available
-- [ ] User's existing functions preserved
-- [ ] Tab completion shows all options
+# Load plugins (explicit for MVP)
+local _plugins=(${(s: :)SHELLOGRAPHER_PLUGINS:-wrangler gh docker})
+
+for _plugin in $_plugins; do
+  local _plugin_file="$_sdir/plugins/$_plugin/$_plugin.plugin.zsh"
+  local _loaded_var="_SHELLOGRAPHER_PLUGIN_${(U)_plugin}"
+  
+  (( ${(P)+_loaded_var} )) && continue
+  
+  if [[ -f "$_plugin_file" ]]; then
+    typeset -g "${_loaded_var}=1"
+    source "$_plugin_file"
+  fi
+done
+
+unset _sdir _plugin _plugin_file _plugins _loaded_var
+```
 
 ---
 
-## Phase 2: MVP Tools (Week 2)
+### Step 4: Caps Command
+**File:** `shellographer/lib/caps.zsh`  
+**Time:** 2 hours
+
+```zsh
+# Requirements:
+# - Write registry to file ONLY when called
+# - Never during startup
+
+caps() {
+  local _registry_file="${XDG_CACHE_HOME:-$HOME/.cache}/shellographer/registry"
+  
+  # Write memory to file (lazy)
+  if (( $#_SHELLOGRAPHER_REGISTRY > 0 )); then
+    mkdir -p "${_registry_file:h}"
+    for name desc in "${(@kv)_SHELLOGRAPHER_REGISTRY}"; do
+      print "$name:$desc"
+    done >| "$_registry_file"
+  fi
+  
+  if [[ -z "$1" ]]; then
+    # List services
+    [[ -f "$_registry_file" ]] && cut -d: -f1 "$_registry_file" | cut -d- -f1 | sort -u
+  else
+    # List commands for service
+    [[ -f "$_registry_file" ]] && grep "^$1-" "$_registry_file" 2>/dev/null | column -t -s:
+  fi
+}
+```
+
+---
+
+## Phase 2: Plugins (Week 2)
+
+### Step 5: Wrangler Plugin
+**File:** `shellographer/plugins/wrangler/wrangler.plugin.zsh`  
+**Time:** 4 hours
+
+**Aliases (8):**
+```
+wrangler-dev-server      # wrangler dev
+wrangler-deploy-worker   # wrangler deploy
+wrangler-kv-list         # wrangler kv:list
+wrangler-kv-get          # wrangler kv:key get
+wrangler-kv-put          # wrangler kv:key put
+wrangler-r2-list         # wrangler r2:buckets list
+wrangler-tail            # wrangler tail
+wrangler-secrets-list    # wrangler secret list
+```
+
+**Requirements:**
+- Add fpath early
+- Guard if wrangler not installed
+- Fallback if lib missing
+- Defer compdef check
+
+---
 
 ### Step 6: GitHub Plugin
-**File:** `gh/gh.plugin.zsh`
+**File:** `shellographer/plugins/gh/gh.plugin.zsh`  
 **Time:** 4 hours
-**Dependencies:** Step 1
 
-**Aliases:**
-| Alias | Command | Description |
-|-------|---------|-------------|
-| `gh-pr-create` | `gh pr create` | Create PR |
-| `gh-pr-checkout` | `gh pr checkout` | Checkout PR |
-| `gh-pr-merge` | `gh pr merge` | Merge PR |
-| `gh-pr-view` | `gh pr view` | View PR |
-| `gh-pr-list` | `gh pr list` | List PRs |
-| `gh-issue-create` | `gh issue create` | Create issue |
-| `gh-issue-list` | `gh issue list` | List issues |
-| `gh-repo-view` | `gh repo view` | View repo |
-| `gh-workflow-list` | `gh workflow list` | List workflows |
-| `gh-run-list` | `gh run list` | List workflow runs |
+**Aliases (10):**
+```
+gh-pr-create      # gh pr create
+gh-pr-checkout    # gh pr checkout
+gh-pr-merge       # gh pr merge
+gh-pr-view        # gh pr view
+gh-pr-list        # gh pr list
+gh-issue-create   # gh issue create
+gh-issue-list     # gh issue list
+gh-repo-view      # gh repo view
+gh-workflow-list  # gh workflow list
+gh-run-list       # gh run list
+```
 
 **Completions:**
-- Dynamic PR numbers: `gh pr checkout <Tab>`
-- Workflow names: `gh workflow run <Tab>`
-- Cache: 60s TTL
+- Dynamic PR numbers (cache 60s)
+- Workflow names (cache 300s)
 
 ---
 
 ### Step 7: Docker Plugin
-**File:** `docker/docker.plugin.zsh`
+**File:** `shellographer/plugins/docker/docker.plugin.zsh`  
 **Time:** 3 hours
 
-**Aliases:**
-| Alias | Command |
-|-------|---------|
-| `docker-container-list` | `docker ps` |
-| `docker-container-list-all` | `docker ps -a` |
-| `docker-container-exec` | `docker exec -it` |
-| `docker-container-logs` | `docker logs -f` |
-| `docker-container-stop` | `docker stop` |
-| `docker-container-rm` | `docker rm` |
-| `docker-image-list` | `docker images` |
-| `docker-image-build` | `docker build` |
-| `docker-compose-up` | `docker-compose up -d` |
-| `docker-compose-down` | `docker-compose down` |
-
-**Completions:**
-- Container names from `docker ps`
-- Image names from `docker images`
-
----
-
-### Step 8: DigitalOcean Plugin
-**File:** `doctl/doctl.plugin.zsh`
-**Time:** 2 hours
-
-**Aliases:**
-| Alias | Command |
-|-------|---------|
-| `doctl-droplet-list` | `doctl compute droplet list` |
-| `doctl-droplet-create` | `doctl compute droplet create` |
-| `doctl-k8s-list` | `doctl kubernetes cluster list` |
-| `doctl-db-list` | `doctl databases list` |
-| `doctl-app-list` | `doctl apps list` |
-| `doctl-account-get` | `doctl account get` |
-
----
-
-### Step 9: AWS Plugin (Basic)
-**File:** `aws/aws.plugin.zsh`
-**Time:** 3 hours
-
-**Aliases (S3 + Lambda basics):**
-| Alias | Command |
-|-------|---------|
-| `aws-s3-list` | `aws s3 ls` |
-| `aws-s3-sync` | `aws s3 sync` |
-| `aws-lambda-list` | `aws lambda list-functions` |
-| `aws-lambda-logs` | `aws logs tail` |
-| `aws-ecs-list` | `aws ecs list-services` |
-| `aws-cloudformation-list` | `aws cloudformation list-stacks` |
-
-**Note:** Full AWS completion is complex; start with common operations.
-
----
-
-### Step 10: Firebase Plugin (Basic)
-**File:** `firebase/firebase.plugin.zsh`
-**Time:** 2 hours
-
-**Aliases:**
-| Alias | Command |
-|-------|---------|
-| `firebase-deploy` | `firebase deploy` |
-| `firebase-deploy-hosting` | `firebase deploy --only hosting` |
-| `firebase-deploy-functions` | `firebase deploy --only functions` |
-| `firebase-emulators-start` | `firebase emulators:start` |
-| `firebase-functions-log` | `firebase functions:log` |
-| `firebase-init` | `firebase init` |
-
----
-
-## Phase 3: Discovery System (Week 3)
-
-### Step 11: Caps Command
-**File:** `shellographer/lib/caps.zsh`
-**Time:** 3 hours
-**Dependencies:** Phase 2
-
-**Implementation:**
-```zsh
-# caps - Command discovery
-caps() {
-  local registry="${ZSH_CACHE_DIR:-$HOME/.cache/oh-my-zsh}/shellographer/registry"
-  
-  if [[ -z "$1" ]]; then
-    # List all services
-    [[ -f "$registry" ]] && cut -d: -f1 "$registry" | cut -d- -f1 | sort -u
-  else
-    # List commands for service
-    [[ -f "$registry" ]] && grep "^$1-" "$registry" 2>/dev/null | column -t -s:
-  fi
-}
+**Aliases (8):**
 ```
-
-**Usage:**
-```zsh
-caps              # Show: wrangler, gh, docker, doctl, aws, firebase
-caps wrangler     # Show all wrangler-* aliases with descriptions
+docker-container-list      # docker ps
+docker-container-list-all  # docker ps -a
+docker-container-exec      # docker exec -it
+docker-container-logs      # docker logs -f
+docker-container-stop      # docker stop
+docker-image-list          # docker images
+docker-image-build         # docker build
+docker-compose-up          # docker-compose up -d
 ```
 
 ---
 
-### Step 12: Enhanced Completions
-**Time:** 3 hours
-**Files:** Update all plugins
+## Phase 3: Testing & Release (Week 3)
 
-**Add to each plugin:**
-```zsh
-# Example: wrangler completions
-_wrangler_complete_namespaces() {
-  local cache_key="wrangler/namespaces"
-  local cmd="wrangler kv:namespace list --json 2>/dev/null | jq -r '.[].title'"
-  _shellographer_cache "$cache_key" 300 "$cmd"
-}
-
-# Register with compdef
-compdef '_wrangler_complete_namespaces' wrangler-kv-get 2>/dev/null || true
-compdef '_wrangler_complete_namespaces' wrangler-kv-put 2>/dev/null || true
-```
-
----
-
-### Step 13: Documentation
-**Files:** Multiple READMEs
-**Time:** 3 hours
-
-**Structure:**
-```
-README.md                    # Main project README
-├── Installation
-├── Usage
-├── Available Plugins
-└── Philosophy
-
-wrangler/README.md           # Per-plugin docs
-├── Aliases
-├── Completions
-└── Examples
-
-gh/README.md
-docker/README.md
-...
-```
-
-**Main README sections:**
-1. One-line install
-2. Philosophy (transparent technology)
-3. Quick start
-4. Naming convention explanation
-5. Plugin list
-6. Caps command usage
-
----
-
-## Phase 4: Polish & Release (Week 4)
-
-### Step 14: Install Script
-**File:** `install.sh`
-**Time:** 2 hours
-
-**Features:**
-```bash
-#!/bin/bash
-# One-line install: curl -fsSL ... | bash
-
-# 1. Detect oh-my-zsh installation
-# 2. Clone or copy plugins to custom/plugins/
-# 3. Update ~/.zshrc (or print instructions)
-# 4. Verify installation
-```
-
-**Modes:**
-- `--all` - Install all plugins
-- `--minimal` - Install wrangler, gh, docker only
-- `--dry-run` - Show what would happen
-
----
-
-### Step 15: Testing Suite
-**Directory:** `tests/`
+### Step 8: Test Suite
+**Directory:** `shellographer/tests/`  
 **Time:** 4 hours
 
-**Tests:**
 ```
 tests/
-├── test_alias_helper.zsh      # Unit tests for _shellographer_alias
-├── test_cache_helper.zsh      # Unit tests for _shellographer_cache
-├── test_wrangler.zsh          # Plugin tests
+├── test_alias_helper.zsh
+├── test_cache_helper.zsh
+├── test_wrangler.zsh
 ├── test_gh.zsh
-├── integration.zsh            # Full .zshrc integration
-└── run_all.zsh                # Test runner
+└── run_all.zsh
 ```
 
-**CI:** GitHub Actions (optional)
-```yaml
-# .github/workflows/test.yml
-- Run all tests
-- Check zsh syntax
-- Verify no alias collisions
+**Test Framework:**
+```zsh
+#!/usr/bin/env zsh
+setopt err_exit nounset
+
+TESTS_RUN=0 TESTS_PASSED=0 TESTS_FAILED=0
+
+assert() {
+  local expected=$1 actual=$2 name=$3
+  (( TESTS_RUN++ ))
+  if [[ "$expected" == "$actual" ]]; then
+    (( TESTS_PASSED++ ))
+    print "✓ $name"
+  else
+    (( TESTS_FAILED++ ))
+    print "✗ $name"
+    print "  Expected: $expected, Actual: $actual"
+  fi
+}
+
+# Load and test
+source ../lib/alias-helper.zsh
+
+# Test 1: Create alias
+_shellographer_alias "test-1" "echo test"
+assert 0 $? "Alias creation returns 0"
+
+# Test 2: Conflict detection
+alias existing="echo test"
+_shellographer_alias "existing" "echo new"
+assert 1 $? "Conflict returns 1"
+
+print ""
+print "Results: $TESTS_PASSED/$TESTS_RUN passed"
+(( TESTS_FAILED == 0 )) || exit 1
 ```
 
 ---
 
-### Step 16: GitHub Release
+### Step 9: Documentation
+**Files:**  
+**Time:** 3 hours
+
+- `README.md` - Main project docs
+- `plugins/wrangler/README.md` - Usage examples
+- `plugins/gh/README.md` - Usage examples
+- `plugins/docker/README.md` - Usage examples
+
+---
+
+### Step 10: Install Script
+**File:** `install.sh`  
+**Time:** 2 hours
+
+```bash
+#!/bin/bash
+# One-line install
+# curl -fsSL ... | bash
+
+set -e
+
+INSTALL_DIR="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins/shellographer"
+
+echo "Installing Shellographer..."
+
+# Clone
+if [[ -d "$INSTALL_DIR" ]]; then
+  echo "Updating existing installation..."
+  git -C "$INSTALL_DIR" pull
+else
+  git clone https://github.com/passwordless-OTP/shellographer.git "$INSTALL_DIR"
+fi
+
+# Instructions
+echo ""
+echo "Add to your ~/.zshrc:"
+echo "  plugins=(shellographer)"
+echo ""
+echo "Optional - customize plugins:"
+echo "  SHELLOGRAPHER_PLUGINS=\"wrangler gh docker\""
+echo ""
+echo "Enable debug mode:"
+echo "  SHELLOGRAPHER_DEBUG=1"
+```
+
+---
+
+### Step 11: Performance Benchmarks
 **Time:** 1 hour
 
-**Tasks:**
+```bash
+# Benchmark startup time
+$ time zsh -c "source ~/.zshrc; exit"
+# Target: < 50ms
+
+# Benchmark completion
+$ time (wrangler-<Tab>)
+# Target: < 100ms
+```
+
+---
+
+### Step 12: GitHub Release
+**Time:** 1 hour
+
 - [ ] Tag v1.0.0
 - [ ] Write release notes
-- [ ] Create shellographer-1.0.0.tar.gz
-- [ ] Update install.sh with release URL
-- [ ] Test install on fresh system
+- [ ] Test install on fresh macOS
+- [ ] Test install on fresh Ubuntu
 
 ---
 
@@ -585,21 +386,28 @@ tests/
 
 | Phase | Steps | Hours | Deliverables |
 |-------|-------|-------|--------------|
-| 1 | 5 | 10.5 | Core lib, wrangler plugin, tested |
-| 2 | 5 | 14 | 5 plugins (gh, docker, doctl, aws, firebase) |
-| 3 | 3 | 9 | Caps, completions, docs |
-| 4 | 2 | 7 | Install script, tests, release |
-| **Total** | **15** | **40.5** | v1.0.0 |
+| 1 | 4 | 9 | Core libs, loader, caps |
+| 2 | 3 | 11 | 3 plugins (wrangler, gh, docker) |
+| 3 | 4 | 8 | Tests, docs, install, release |
+| **Total** | **11** | **28** | **v1.0.0** |
 
 ---
 
-## Current Status
+## Key Decisions
 
-- [x] PRD expanded and committed
-- [ ] Step 1: alias-helper.zsh
-- [ ] Step 2: cache-helper.zsh
-- [ ] Step 3: shellographer.plugin.zsh
-- [ ] Step 4: wrangler.plugin.zsh
-- [ ] ...
+| Decision | Rationale |
+|----------|-----------|
+| Explicit plugin list | Faster startup, no surprises |
+| No file I/O at init | < 50ms startup guarantee |
+| Debug mode | Easier troubleshooting |
+| Lock files | Prevent cache race conditions |
+| 3 plugins for MVP | Quality over quantity |
+| Standalone plugins | Work without shellographer lib |
 
-**Next:** Step 1 - Create `shellographer/lib/alias-helper.zsh`
+---
+
+## Next Action
+
+**Step 1:** Create `shellographer/lib/alias-helper.zsh`
+
+Ready to start?
