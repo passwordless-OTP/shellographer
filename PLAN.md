@@ -257,59 +257,351 @@ docker-compose-up          # docker-compose up -d
 
 ## Phase 3: Testing & Release (Week 3)
 
-### Step 8: Test Suite
-**Directory:** `shellographer/tests/`  
-**Time:** 4 hours
+### Step 8: Test Framework
+**File:** `tests/framework.zsh`  
+**Time:** 1 hour
 
-```
-tests/
-├── test_alias_helper.zsh
-├── test_cache_helper.zsh
-├── test_wrangler.zsh
-├── test_gh.zsh
-└── run_all.zsh
-```
-
-**Test Framework:**
 ```zsh
 #!/usr/bin/env zsh
-setopt err_exit nounset
+# Test framework with setup/teardown, skip, and proper error handling
 
-TESTS_RUN=0 TESTS_PASSED=0 TESTS_FAILED=0
+setopt nounset local_options no_err_exit
 
-assert() {
+typeset -gi _TESTS_RUN=0 _TESTS_PASSED=0 _TESTS_FAILED=0 _TESTS_SKIPPED=0
+typeset -ga _TEST_FAILURES=() _TEST_SETUP=() _TEST_TEARDOWN=()
+
+assert_equals() {
   local expected=$1 actual=$2 name=$3
-  (( TESTS_RUN++ ))
+  (( _TESTS_RUN++ ))
   if [[ "$expected" == "$actual" ]]; then
-    (( TESTS_PASSED++ ))
+    (( _TESTS_PASSED++ ))
     print "✓ $name"
+    return 0
   else
-    (( TESTS_FAILED++ ))
+    (( _TESTS_FAILED++ ))
+    _TEST_FAILURES+=("$name: expected '$expected', got '$actual'")
     print "✗ $name"
-    print "  Expected: $expected, Actual: $actual"
+    print "  Expected: $expected"
+    print "  Actual:   $actual"
+    return 1
   fi
 }
 
-# Load and test
-source ../lib/alias-helper.zsh
+assert_true() {
+  local code=$1 name=$2
+  (( _TESTS_RUN++ ))
+  if (( code == 0 )); then
+    (( _TESTS_PASSED++ ))
+    print "✓ $name"
+    return 0
+  else
+    (( _TESTS_FAILED++ ))
+    _TEST_FAILURES+=("$name: expected true, got exit code $code")
+    print "✗ $name"
+    return 1
+  fi
+}
 
-# Test 1: Create alias
-_shellographer_alias "test-1" "echo test"
-assert 0 $? "Alias creation returns 0"
+assert_alias_exists() {
+  local name=$1
+  (( _TESTS_RUN++ ))
+  if (( $+aliases[$name] )); then
+    (( _TESTS_PASSED++ ))
+    print "✓ Alias $name exists"
+  else
+    (( _TESTS_FAILED++ ))
+    _TEST_FAILURES+=("Alias $name does not exist")
+    print "✗ Alias $name does not exist"
+  fi
+}
 
-# Test 2: Conflict detection
-alias existing="echo test"
-_shellographer_alias "existing" "echo new"
-assert 1 $? "Conflict returns 1"
+skip_if_no_command() {
+  local cmd=$1
+  if (( ! $+commands[$cmd] )); then
+    (( _TESTS_SKIPPED++ ))
+    print "⊘ Skipped: $cmd not installed"
+    return 1
+  fi
+  return 0
+}
 
-print ""
-print "Results: $TESTS_PASSED/$TESTS_RUN passed"
-(( TESTS_FAILED == 0 )) || exit 1
+print_summary() {
+  print ""
+  print "═══════════════════════════════════════"
+  print "Test Results: $_TESTS_PASSED/$_TESTS_RUN passed ($_TESTS_SKIPPED skipped)"
+  print "═══════════════════════════════════════"
+  
+  if (( ${#_TEST_FAILURES} > 0 )); then
+    print ""
+    print "Failures:"
+    local failure
+    for failure in $_TEST_FAILURES; do
+      print "  - $failure"
+    done
+  fi
+  
+  (( _TESTS_FAILED == 0 ))
+  return $?
+}
 ```
 
 ---
 
-### Step 9: Documentation
+### Step 9: Unit Tests
+**Files:** `tests/unit/test_*.zsh`  
+**Time:** 1.5 hours
+
+```
+tests/unit/
+├── test_alias_helper.zsh
+└── test_cache_helper.zsh
+```
+
+**test_alias_helper.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+source "${0:A:h:h:h}/lib/alias-helper.zsh"
+
+test_alias_created_when_no_conflict() {
+  _shellographer_alias "test-create" "echo test"
+  assert_equals 0 $? "Alias creation returns 0"
+  assert_alias_exists "test-create"
+  unalias test-create 2>/dev/null || true
+}
+
+test_alias_skipped_when_function_exists() {
+  test-skip-func() { echo "existing"; }
+  _shellographer_alias "test-skip-func" "echo new"
+  assert_equals 1 $? "Conflict with function returns 1"
+  unfunction test-skip-func 2>/dev/null || true
+}
+
+test_alias_skipped_when_alias_exists() {
+  alias test-skip-alias="echo existing"
+  _shellographer_alias "test-skip-alias" "echo new"
+  assert_equals 1 $? "Conflict with alias returns 1"
+  unalias test-skip-alias 2>/dev/null || true
+}
+
+test_debug_mode_shows_output() {
+  SHELLOGRAPHER_DEBUG=1
+  alias test-debug="echo test"
+  local output=$(_shellographer_alias "test-debug" "echo new" 2>&1)
+  SHELLOGRAPHER_DEBUG=0
+  assert_true "[[ '$output' == *'Skip'* ]]" "Debug mode shows skip message"
+  unalias test-debug 2>/dev/null || true
+}
+
+# Run
+run_test test_alias_created_when_no_conflict
+run_test test_alias_skipped_when_function_exists
+run_test test_alias_skipped_when_alias_exists
+run_test test_debug_mode_shows_output
+print_summary
+```
+
+**test_cache_helper.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+source "${0:A:h:h:h}/lib/cache-helper.zsh"
+
+test_cache_hit_returns_data() {
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/shellographer-test"
+  mkdir -p "$cache_dir"
+  echo "cached" > "$cache_dir/test_hit"
+  
+  local result=$(_shellographer_cache "test_hit" 60 "echo new")
+  assert_equals "cached" "$result" "Cache hit returns cached data"
+  
+  rm -rf "$cache_dir"
+}
+
+test_cache_expired_returns_stale() {
+  local cache_dir="${XDG_CACHE_HOME:-$HOME/.cache}/shellographer-test"
+  mkdir -p "$cache_dir"
+  echo "stale" > "$cache_dir/test_stale"
+  touch -t $(date -v-10S +%Y%m%d%H%M.%S 2>/dev/null || date -d "10 sec ago" +%Y%m%d%H%M.%S 2>/dev/null || echo 197001010000.00) "$cache_dir/test_stale" 2>/dev/null || true
+  
+  local result=$(_shellographer_cache "test_stale" 5 "echo refreshed")
+  assert_equals "stale" "$result" "Cache expired returns stale data"
+  
+  rm -rf "$cache_dir"
+}
+
+# Run
+run_test test_cache_hit_returns_data
+run_test test_cache_expired_returns_stale
+print_summary
+```
+
+---
+
+### Step 10: Integration Tests
+**Files:** `tests/integration/test_*.zsh`  
+**Time:** 2 hours
+
+```
+tests/integration/
+├── test_zshrc_loading.zsh
+├── test_plugin_isolation.zsh
+└── test_no_collisions.zsh
+```
+
+**test_zshrc_loading.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+
+test_no_parse_errors() {
+  local test_zshrc=$(mktemp)
+  cat > $test_zshrc << 'EOF'
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME="robbyrussell"
+plugins=(shellographer)
+source $ZSH/oh-my-zsh.sh
+EOF
+  
+  zsh -c "source $test_zshrc; exit 0" 2>&1
+  assert_equals 0 $? ".zshrc sources without errors"
+  
+  rm -f $test_zshrc
+}
+
+test_user_function_preserved() {
+  local test_zshrc=$(mktemp)
+  cat > $test_zshrc << 'EOF'
+gh-pr-create() { echo "user function"; }
+export ZSH="$HOME/.oh-my-zsh"
+plugins=(shellographer)
+source $ZSH/oh-my-zsh.sh
+# Check if function still exists
+type gh-pr-create | grep -q "function"
+EOF
+  
+  zsh -c "source $test_zshrc" 2>&1
+  assert_equals 0 $? "User function preserved"
+  
+  rm -f $test_zshrc
+}
+
+run_test test_no_parse_errors
+run_test test_user_function_preserved
+print_summary
+```
+
+**test_plugin_isolation.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+
+test_wrangler_works_standalone() {
+  # Don't load shellographer.plugin.zsh, just wrangler
+  local test_zshrc=$(mktemp)
+  cat > $test_zshrc << 'EOF'
+export ZSH="$HOME/.oh-my-zsh"
+source ~/.oh-my-zsh/custom/plugins/shellographer/plugins/wrangler/wrangler.plugin.zsh
+alias | grep -q "wrangler-dev-server"
+EOF
+  
+  zsh -c "source $test_zshrc" 2>&1
+  assert_equals 0 $? "Wrangler plugin works standalone"
+  
+  rm -f $test_zshrc
+}
+
+run_test test_wrangler_works_standalone
+print_summary
+```
+
+---
+
+### Step 11: Performance Tests
+**Files:** `tests/performance/test_*.zsh`  
+**Time:** 1 hour
+
+```
+tests/performance/
+└── test_startup_time.zsh
+```
+
+**test_startup_time.zsh:**
+```zsh
+#!/usr/bin/env zsh
+source "${0:A:h:h}/framework.zsh"
+
+test_startup_under_50ms() {
+  # Warmup
+  zsh -c "source ~/.zshrc" 2>/dev/null
+  
+  # Benchmark
+  local start end duration_ms
+  start=$(date +%s%N)
+  zsh -c "source ~/.zshrc; exit 0" 2>/dev/null
+  end=$(date +%s%N)
+  
+  duration_ms=$(( (end - start) / 1000000 ))
+  print "Startup time: ${duration_ms}ms"
+  
+  (( duration_ms < 50 )) && \
+    assert_equals 0 0 "Startup under 50ms (${duration_ms}ms)" || \
+    assert_equals 0 1 "Startup over 50ms (${duration}ms)"
+}
+
+run_test test_startup_under_50ms
+print_summary
+```
+
+---
+
+### Step 12: CI Configuration
+**File:** `.github/workflows/test.yml`  
+**Time:** 0.5 hours
+
+```yaml
+name: Tests
+
+on:
+  push:
+    branches: [ master, main ]
+  pull_request:
+    branches: [ master, main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        zsh-version: ['5.8', '5.9']
+    
+    steps:
+    - uses: actions/checkout@v3
+    
+    - name: Install Zsh
+      run: sudo apt-get update && sudo apt-get install -y zsh
+    
+    - name: Install oh-my-zsh
+      run: |
+        sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+        rm -rf ~/.oh-my-zsh/custom/plugins/shellographer
+        ln -s $PWD ~/.oh-my-zsh/custom/plugins/shellographer
+    
+    - name: Run Unit Tests
+      run: zsh tests/unit/test_alias_helper.zsh
+    
+    - name: Run Integration Tests
+      run: zsh tests/integration/test_zshrc_loading.zsh
+    
+    - name: Test .zshrc Loading
+      run: |
+        echo 'plugins=(shellographer)' >> ~/.zshrc
+        zsh -c "source ~/.zshrc; exit 0"
+```
+
+---
+
+### Step 13: Documentation
 **Files:**  
 **Time:** 3 hours
 
@@ -320,7 +612,7 @@ print "Results: $TESTS_PASSED/$TESTS_RUN passed"
 
 ---
 
-### Step 10: Install Script
+### Step 14: Install Script
 **File:** `install.sh`  
 **Time:** 2 hours
 
@@ -357,7 +649,7 @@ echo "  SHELLOGRAPHER_DEBUG=1"
 
 ---
 
-### Step 11: Performance Benchmarks
+### Step 15: Performance Benchmarks
 **Time:** 1 hour
 
 ```bash
@@ -372,7 +664,7 @@ $ time (wrangler-<Tab>)
 
 ---
 
-### Step 12: GitHub Release
+### Step 16: GitHub Release
 **Time:** 1 hour
 
 - [ ] Tag v1.0.0
@@ -388,8 +680,8 @@ $ time (wrangler-<Tab>)
 |-------|-------|-------|--------------|
 | 1 | 4 | 9 | Core libs, loader, caps |
 | 2 | 3 | 11 | 3 plugins (wrangler, gh, docker) |
-| 3 | 4 | 8 | Tests, docs, install, release |
-| **Total** | **11** | **28** | **v1.0.0** |
+| 3 | 6 | 10 | Tests (framework, unit, integration, perf, CI), docs, install, release |
+| **Total** | **13** | **30** | **v1.0.0** |
 
 ---
 
