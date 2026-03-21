@@ -59,29 +59,39 @@ Shellographer is an **oh-my-zsh enhancement layer**—not a replacement. It prov
 
 ### 3.2 Directory Structure
 
+Single directory install - everything self-contained:
+
 ```
-~/.oh-my-zsh/                    # Git-tracked (official oh-my-zsh)
-├── plugins/                     # Core: git, docker, npm... (356 plugins)
-│   └── ...
-│
-├── custom/                      # Git-ignored (user additions)
-│   └── plugins/                 # ← Shellographer lives here
-│       ├── shellographer/       # Core utilities (optional)
-│       │   ├── shellographer.plugin.zsh
-│       │   ├── README.md
-│       │   └── lib/
-│       │       ├── alias-helper.zsh
-│       │       ├── cache-helper.zsh
-│       │       └── completion-helper.zsh
-│       │
-│       ├── wrangler/            # Individual tool plugins
-│       ├── gh/
-│       ├── docker/
-│       ├── doctl/
-│       ├── aws/
-│       └── firebase/
-│
-└── oh-my-zsh.sh
+~/.oh-my-zsh/custom/plugins/
+└── shellographer/                    # ← Everything lives here
+    ├── shellographer.plugin.zsh      # Main loader
+    ├── README.md
+    ├── lib/                          # Shared utilities
+    │   ├── alias-helper.zsh
+    │   ├── cache-helper.zsh
+    │   └── caps.zsh
+    └── plugins/                      # Individual tool plugins
+        ├── wrangler/
+        │   └── wrangler.plugin.zsh
+        ├── gh/
+        │   └── gh.plugin.zsh
+        ├── docker/
+        │   └── docker.plugin.zsh
+        ├── doctl/
+        ├── aws/
+        └── firebase/
+```
+
+**Install:**
+```bash
+git clone https://github.com/passwordless-OTP/shellographer.git \
+  ~/.oh-my-zsh/custom/plugins/shellographer
+```
+
+**Usage:**
+```zsh
+# ~/.zshrc
+plugins=(shellographer)  # Loads all or configure individually
 ```
 
 ### 3.3 Why `custom/plugins/`?
