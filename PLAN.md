@@ -7,7 +7,7 @@
 | 1 | alias-helper.zsh | ✅ Complete | 73a079f |
 | 2 | cache-helper.zsh | ✅ Complete | 407ba20 |
 | 3 | shellographer.plugin.zsh | ✅ Complete | 2459690 |
-| 4 | caps.zsh | ⏳ In Progress | - |
+| 4 | caps.zsh | ✅ Complete | 2cd1881 |
 | 5 | wrangler.plugin.zsh | ⏳ Pending | - |
 | 6 | gh.plugin.zsh | ⏳ Pending | - |
 | 7 | docker.plugin.zsh | ⏳ Pending | - |
