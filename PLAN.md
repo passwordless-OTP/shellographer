@@ -25,7 +25,7 @@ Based on senior developer review:
 # - Memory-only registry
 # - Clear return codes (0=created, 1=skipped, 2=error)
 
-_typeset -gA _SHELLOGRAPHER_REGISTRY
+typeset -gA _SHELLOGRAPHER_REGISTRY
 
 typeset -g SHELLOGRAPHER_DEBUG=${SHELLOGRAPHER_DEBUG:-0}
 
@@ -288,15 +288,15 @@ assert_equals() {
 }
 
 assert_true() {
-  local code=$1 name=$2
+  local exit_code=$1 name=$2
   (( _TESTS_RUN++ ))
-  if (( code == 0 )); then
+  if (( exit_code == 0 )); then
     (( _TESTS_PASSED++ ))
     print "✓ $name"
     return 0
   else
     (( _TESTS_FAILED++ ))
-    _TEST_FAILURES+=("$name: expected true, got exit code $code")
+    _TEST_FAILURES+=("$name: expected true, got exit code $exit_code")
     print "✗ $name"
     return 1
   fi
@@ -389,7 +389,8 @@ test_debug_mode_shows_output() {
   alias test-debug="echo test"
   local output=$(_shellographer_alias "test-debug" "echo new" 2>&1)
   SHELLOGRAPHER_DEBUG=0
-  assert_true "[[ '$output' == *'Skip'* ]]" "Debug mode shows skip message"
+  [[ "$output" == *"Skip"* ]]
+  assert_equals 0 $? "Debug mode shows skip message"
   unalias test-debug 2>/dev/null || true
 }
 
@@ -555,7 +556,50 @@ print_summary
 
 ---
 
-### Step 12: CI Configuration
+### Step 12: Test Runner
+**File:** `tests/run_all.zsh`  
+**Time:** 0.5 hours
+
+```zsh
+#!/usr/bin/env zsh
+# Run all test files
+
+0=${(%):-%N}
+local test_dir=${0:A:h}
+
+# Source framework
+source "$test_dir/framework.zsh"
+
+# Find and run all test files
+local test_files=("$test_dir"/unit/test_*.zsh(N) "$test_dir"/integration/test_*.zsh(N))
+
+for test_file in $test_files; do
+  print ""
+  print "═══════════════════════════════════════"
+  print "Running: ${test_file:t}"
+  print "═══════════════════════════════════════"
+  
+  # Source test file (defines test functions)
+  source "$test_file"
+  
+  # Find test functions
+  local test_fns=(${(k)functions[(I)test_*]})
+  
+  for fn in $test_fns; do
+    run_test $fn
+  done
+  
+  # Cleanup functions for next file
+  unfunction $test_fns 2>/dev/null || true
+done
+
+print_summary
+exit $?
+```
+
+---
+
+### Step 13: CI Configuration
 **File:** `.github/workflows/test.yml`  
 **Time:** 0.5 hours
 
@@ -587,11 +631,8 @@ jobs:
         rm -rf ~/.oh-my-zsh/custom/plugins/shellographer
         ln -s $PWD ~/.oh-my-zsh/custom/plugins/shellographer
     
-    - name: Run Unit Tests
-      run: zsh tests/unit/test_alias_helper.zsh
-    
-    - name: Run Integration Tests
-      run: zsh tests/integration/test_zshrc_loading.zsh
+    - name: Run All Tests
+      run: zsh tests/run_all.zsh
     
     - name: Test .zshrc Loading
       run: |
@@ -601,7 +642,7 @@ jobs:
 
 ---
 
-### Step 13: Documentation
+### Step 14: Documentation
 **Files:**  
 **Time:** 3 hours
 
@@ -612,7 +653,7 @@ jobs:
 
 ---
 
-### Step 14: Install Script
+### Step 15: Install Script
 **File:** `install.sh`  
 **Time:** 2 hours
 
@@ -649,7 +690,7 @@ echo "  SHELLOGRAPHER_DEBUG=1"
 
 ---
 
-### Step 15: Performance Benchmarks
+### Step 16: Performance Benchmarks
 **Time:** 1 hour
 
 ```bash
@@ -664,7 +705,7 @@ $ time (wrangler-<Tab>)
 
 ---
 
-### Step 16: GitHub Release
+### Step 17: GitHub Release
 **Time:** 1 hour
 
 - [ ] Tag v1.0.0
@@ -680,8 +721,8 @@ $ time (wrangler-<Tab>)
 |-------|-------|-------|--------------|
 | 1 | 4 | 9 | Core libs, loader, caps |
 | 2 | 3 | 11 | 3 plugins (wrangler, gh, docker) |
-| 3 | 6 | 10 | Tests (framework, unit, integration, perf, CI), docs, install, release |
-| **Total** | **13** | **30** | **v1.0.0** |
+| 3 | 7 | 10.5 | Tests (framework, unit, integration, perf, runner, CI), docs, install, release |
+| **Total** | **14** | **30.5** | **v1.0.0** |
 
 ---
 
