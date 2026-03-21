@@ -12,6 +12,7 @@ local _sdir=${0:A:h}
 # Load shared libraries (optional - plugins have fallbacks)
 [[ -f "$_sdir/lib/alias-helper.zsh" ]] && source "$_sdir/lib/alias-helper.zsh"
 [[ -f "$_sdir/lib/cache-helper.zsh" ]] && source "$_sdir/lib/cache-helper.zsh"
+[[ -f "$_sdir/lib/caps.zsh" ]] && source "$_sdir/lib/caps.zsh"
 
 # Determine which plugins to load
 # Users can override: SHELLOGRAPHER_PLUGINS="wrangler gh docker"
